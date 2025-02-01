@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"net/url"
 
+	"github.com/jraman567/tokens"
 	"github.com/veraison/corim/comid"
 	"github.com/veraison/services/handler"
+	"github.com/veraison/services/proto"
 )
 
 type StoreHandler struct{}
@@ -107,6 +109,83 @@ func (s StoreHandler) SynthKeysFromTrustAnchor(_ string, ta *handler.Endorsement
 	u := url.URL{
 		Scheme: SchemeName,
 		Path:   cert.Issuer.CommonName,
+	}
+
+	return []string{u.String()}, nil
+}
+
+// GetTrustAnchorIDs
+//
+// "auxblob" in the TSM report contains a certificate
+// table. Extract ARK from it and construct the TA key.
+func (s StoreHandler) GetTrustAnchorIDs(token *proto.AttestationToken) ([]string, error) {
+	var tsm tokens.TSMReport
+
+	err := tsm.FromCBOR(token.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	ark, err := getARK(tsm.AuxBlob)
+	if err != nil {
+		return nil, err
+	}
+
+	keyBlock, _ := pem.Decode(ark)
+	if keyBlock == nil || keyBlock.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("failed to decode ARK")
+	}
+
+	cert, err := x509.ParseCertificate(keyBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	u := url.URL{
+		Scheme: SchemeName,
+		Path:   cert.Issuer.CommonName,
+	}
+
+	return []string{u.String()}, nil
+}
+
+// GetRefValueIDs
+//
+// Reference value key for SEV-SNP is of the form
+// "SEVSNP://<tenantID>/<measurement>", as explained
+// in SynthKeysFromRefValue.
+//
+// Look up "measurement" using its MKey (641) and construct the refval key.
+func (s StoreHandler) GetRefValueIDs(
+	tenantID string,
+	_ []string,
+	claims map[string]interface{},
+) ([]string, error) {
+	claimsJson, err := json.Marshal(claims)
+	if err != nil {
+		return nil, err
+	}
+
+	extractedComid, err := comidFromJson(claimsJson)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(extractedComid.Triples.ReferenceValues.Values) > 1 {
+		return nil, fmt.Errorf("unable to process multiple claims in evidence")
+	}
+
+	m, err := measurementByUintKey(extractedComid.Triples.ReferenceValues.Values[0], measurementMKey)
+	if err != nil {
+		return nil, err
+	}
+
+	digest := hex.EncodeToString((*m.Val.Digests)[0].HashValue)
+
+	u := url.URL{
+		Scheme: SchemeName,
+		Host:   tenantID,
+		Path:   digest,
 	}
 
 	return []string{u.String()}, nil
